@@ -8,7 +8,7 @@ status. Clarity over polish.
 
 - **React 18 + Vite** — fast dev server and build.
 - **TanStack Query** — server state + polling. The list refetches every 3s and the
-  open conversation every 2s, so `received → processing → sent → delivered`
+  open conversation every 2s, so `received → processing → sent`
   transitions appear live without manual refresh or websockets.
 - **nginx** — serves the static build in the container (SPA fallback).
 
