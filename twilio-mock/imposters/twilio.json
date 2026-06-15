@@ -1,0 +1,23 @@
+{
+  "imposters": [
+    {
+      "port": 4545,
+      "protocol": "http",
+      "name": "twilio-messages-api",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "predicates": [
+            { "equals": { "method": "POST" } },
+            { "matches": { "path": "^/2010-04-01/Accounts/.+/Messages\\.json$" } }
+          ],
+          "responses": [
+            {
+              "inject": "(config) => { const crypto = require('crypto'); const qs = require('querystring'); const body = qs.parse(config.request.body || ''); const sid = 'SM' + crypto.randomBytes(16).toString('hex'); const payload = { sid: sid, account_sid: (config.request.path.split('/')[3] || 'AC'), to: body.To || null, from: body.From || null, body: body.Body || null, status: 'queued', direction: 'outbound-api', num_segments: '1', date_created: new Date().toUTCString(), uri: '/2010-04-01/Accounts/' + (config.request.path.split('/')[3] || 'AC') + '/Messages/' + sid + '.json' }; return { statusCode: 201, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }; }"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
