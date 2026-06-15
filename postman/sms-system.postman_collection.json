@@ -1,0 +1,108 @@
+{
+  "info": {
+    "name": "SMS Messaging System",
+    "_postman_id": "b1a7c0de-1111-4a2b-9c3d-aa00bb11cc22",
+    "description": "Conversational SMS system — API, Twilio webhooks and admin endpoints.\n\nImport this file, then set the collection variables (Variables tab) if needed:\n- `baseUrl` — API host URL. Default `http://localhost:3000`. If you remapped the host port (e.g. API_HOST_PORT=3001), set `http://localhost:3001`.\n- `from` / `to` / `body` — inbound message fields.\n\nFlow to test: send **Inbound SMS** → wait 3–15s → **List conversations** (captures conversationId) → **Get conversation**.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "from", "value": "+15551234567" },
+    { "key": "to", "value": "+15550000000" },
+    { "key": "body", "value": "Hello from Postman" },
+    { "key": "conversationId", "value": "" },
+    { "key": "msgSid", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health & Ops",
+      "item": [
+        {
+          "name": "Health (liveness)",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] } }
+        },
+        {
+          "name": "Ready (Postgres + Redis)",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/ready", "host": ["{{baseUrl}}"], "path": ["ready"] } }
+        }
+      ]
+    },
+    {
+      "name": "Twilio Webhooks",
+      "item": [
+        {
+          "name": "Inbound SMS",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Generate a fresh, unique MessageSid for each send.",
+                  "const hex = '0123456789abcdef';",
+                  "let sid = 'SM';",
+                  "for (let i = 0; i < 32; i++) sid += hex[Math.floor(Math.random() * 16)];",
+                  "pm.collectionVariables.set('msgSid', sid);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('TwiML response', () => pm.expect(pm.response.text()).to.include('<Response>'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "MessageSid", "value": "{{msgSid}}" },
+                { "key": "From", "value": "{{from}}" },
+                { "key": "To", "value": "{{to}}" },
+                { "key": "Body", "value": "{{body}}" }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/webhooks/twilio/sms", "host": ["{{baseUrl}}"], "path": ["webhooks", "twilio", "sms"] },
+            "description": "Simulates an inbound SMS like Twilio. The pre-request script generates a fresh MessageSid. Returns empty TwiML 200 immediately (the 3–15s processing happens async)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin API (v1)",
+      "item": [
+        {
+          "name": "List conversations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (j.conversations && j.conversations.length) {",
+                  "  pm.collectionVariables.set('conversationId', j.conversations[0].id);",
+                  "  console.log('conversationId =', j.conversations[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/api/v1/conversations", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversations"] } }
+        },
+        {
+          "name": "Get conversation",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/api/v1/conversations/{{conversationId}}", "host": ["{{baseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}"] } }
+        }
+      ]
+    }
+  ]
+}
