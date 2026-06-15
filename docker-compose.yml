@@ -1,0 +1,112 @@
+name: sms-messaging-system
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sms}
+      POSTGRES_DB: ${POSTGRES_DB:-sms}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sms} -d ${POSTGRES_DB:-sms}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # fsync every write so queued jobs survive a crash
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mountebank:
+    build:
+      context: ./twilio-mock
+    ports:
+      - "2525:2525"   # mountebank admin
+      - "4545:4545"   # twilio imposter
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://localhost:2525/imposters',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ./backend
+    command: ["npm", "run", "db:migrate"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend-api:
+    build:
+      context: ./backend
+    command: ["node", "dist/entrypoints/api.js"]
+    env_file: .env
+    ports:
+      - "${API_HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mountebank:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend-worker:
+    build:
+      context: ./backend
+    command: ["node", "dist/entrypoints/worker.js"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mountebank:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    # scale workers independently: docker compose up --scale backend-worker=3
+    deploy:
+      replicas: 1
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend-api
+
+volumes:
+  pgdata:
+  redisdata:
