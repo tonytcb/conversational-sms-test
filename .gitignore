@@ -6,6 +6,14 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
+# IDE files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
@@ -66,9 +74,9 @@ web_modules/
 .yarn-integrity
 
 # dotenv environment variable files
-.env
 .env.*
 !.env.example
+# .env is committed here on purpose — only local/mock values, makes the app run out-of-the-box
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -141,3 +149,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Drizzle
+drizzle/meta/_journal.bak
