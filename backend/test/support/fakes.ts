@@ -99,9 +99,33 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
           conversationId: input.conversationId,
           direction: input.direction,
           providerSid: input.providerSid,
+          idempotencyKey: input.idempotencyKey ?? null,
           body: input.body,
           status: input.status,
           replyToMessageId: input.replyToMessageId ?? null,
+          processedAt: null,
+          createdAt: input.now,
+          updatedAt: input.now,
+        };
+        this.messagesData.push(message);
+        return { message: { ...message }, inserted: true };
+      },
+      insertReplyIntent: async (input) => {
+        // partial unique(reply_to_message_id) WHERE outbound -> one reply per inbound
+        const existing = this.messagesData.find(
+          (m) => m.direction === 'outbound' && m.replyToMessageId === input.replyToMessageId,
+        );
+        if (existing) return { message: { ...existing }, inserted: false };
+        const message: MessageRecord = {
+          id: ++this.msgSeq,
+          publicId: `msg-${this.msgSeq}`,
+          conversationId: input.conversationId,
+          direction: 'outbound',
+          providerSid: null,
+          idempotencyKey: input.idempotencyKey,
+          body: input.body,
+          status: 'queued',
+          replyToMessageId: input.replyToMessageId,
           processedAt: null,
           createdAt: input.now,
           updatedAt: input.now,
@@ -138,9 +162,10 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id - b.id);
         return candidates[0] ? { ...candidates[0] } : null;
       },
-      updateStatus: async ({ id, status, processedAt, now }) => {
+      updateStatus: async ({ id, status, providerSid, processedAt, now }) => {
         const m = this.messagesData.find((x) => x.id === id)!;
         m.status = status;
+        if (providerSid !== undefined) m.providerSid = providerSid;
         if (processedAt !== undefined) m.processedAt = processedAt;
         m.updatedAt = now;
         return { ...m };
@@ -192,16 +217,31 @@ export class FakeSleeper implements Sleeper {
 }
 
 export class FakeSmsProvider implements SmsProvider {
-  public sent: { to: string; from: string; body: string }[] = [];
+  // `sent` = unique deliveries (deduped by idempotency key, like a provider that honors it).
+  // `calls` = total send() invocations, so tests can prove a retried send was deduped.
+  public sent: { to: string; from: string; body: string; idempotencyKey: string }[] = [];
+  public calls = 0;
   public failNext = false;
   private seq = 0;
-  async send(input: { to: string; from: string; body: string }): Promise<{ providerSid: string; status: string }> {
+  private byKey = new Map<string, { providerSid: string; status: string }>();
+
+  async send(input: {
+    to: string;
+    from: string;
+    body: string;
+    idempotencyKey: string;
+  }): Promise<{ providerSid: string; status: string }> {
+    this.calls += 1;
     if (this.failNext) {
       this.failNext = false;
       throw new Error('provider send failed');
     }
+    const existing = this.byKey.get(input.idempotencyKey);
+    if (existing) return existing; // provider dedup -> no second text
+    const result = { providerSid: `SMout${++this.seq}`, status: 'queued' };
+    this.byKey.set(input.idempotencyKey, result);
     this.sent.push(input);
-    return { providerSid: `SMout${++this.seq}`, status: 'queued' };
+    return result;
   }
 }
 

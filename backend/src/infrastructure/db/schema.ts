@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   index,
@@ -16,6 +17,7 @@ export const directionEnum = pgEnum('message_direction', ['inbound', 'outbound']
 export const messageStatusEnum = pgEnum('message_status', [
   'received',
   'processing',
+  'queued', // outbound reply intent persisted, before the provider confirms (exactly-once send)
   'sent',
   'delivered',
   'failed',
@@ -48,6 +50,8 @@ export const messages = pgTable(
     direction: directionEnum('direction').notNull(),
     // Twilio MessageSid. UNIQUE -> idempotency key for duplicate deliveries.
     providerSid: text('provider_sid'),
+    // Deterministic send idempotency key on outbound replies (exactly-once send).
+    idempotencyKey: text('idempotency_key'),
     body: text('body').notNull(),
     status: messageStatusEnum('status').notNull(),
     // Links an outbound reply back to the inbound it answers (send idempotency).
@@ -62,6 +66,13 @@ export const messages = pgTable(
   (t) => [
     uniqueIndex('messages_public_id_uq').on(t.publicId),
     uniqueIndex('messages_provider_sid_uq').on(t.providerSid),
+    // exactly-once send: one outbound reply per inbound, one row per idempotency key
+    uniqueIndex('messages_reply_to_uq')
+      .on(t.replyToMessageId)
+      .where(sql`${t.direction} = 'outbound'`),
+    uniqueIndex('messages_idempotency_key_uq')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} is not null`),
     index('messages_conversation_created_idx').on(t.conversationId, t.createdAt),
     index('messages_status_idx').on(t.status),
   ],

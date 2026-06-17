@@ -16,15 +16,29 @@ export interface InsertMessageInput {
   conversationId: number;
   direction: Direction;
   providerSid: string | null;
+  idempotencyKey?: string | null;
   body: string;
   status: MessageStatus;
   replyToMessageId?: number | null;
   now: Date;
 }
 
+export interface InsertReplyIntentInput {
+  conversationId: number;
+  replyToMessageId: number;
+  idempotencyKey: string;
+  body: string;
+  now: Date;
+}
+
 export interface MessageRepository {
   // ON CONFLICT(provider_sid) DO NOTHING; inserted=false means it was a duplicate
   insertDedup(input: InsertMessageInput): Promise<{ message: MessageRecord; inserted: boolean }>;
+
+  // exactly-once send: persist the outbound reply intent (status=queued, provider_sid=null)
+  // before calling the provider. ON CONFLICT(reply_to_message_id) DO NOTHING — a racing
+  // worker or a retry gets inserted=false and the already-claimed row back.
+  insertReplyIntent(input: InsertReplyIntentInput): Promise<{ message: MessageRecord; inserted: boolean }>;
 
   findById(id: number): Promise<MessageRecord | null>;
   findByPublicId(publicId: string): Promise<MessageRecord | null>;
@@ -39,6 +53,7 @@ export interface MessageRepository {
   updateStatus(input: {
     id: number;
     status: MessageStatus;
+    providerSid?: string; // set when finalizing an outbound intent (queued -> sent)
     processedAt?: Date | null;
     now: Date;
   }): Promise<MessageRecord>;

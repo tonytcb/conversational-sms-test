@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type {
   ConversationRepository,
   InsertMessageInput,
@@ -32,6 +32,7 @@ function mapMessage(r: MessageRow): MessageRecord {
     conversationId: r.conversationId,
     direction: r.direction,
     providerSid: r.providerSid,
+    idempotencyKey: r.idempotencyKey,
     body: r.body,
     status: r.status,
     replyToMessageId: r.replyToMessageId,
@@ -118,6 +119,7 @@ function messageRepo(ex: Executor): MessageRepository {
           conversationId: input.conversationId,
           direction: input.direction,
           providerSid: input.providerSid,
+          idempotencyKey: input.idempotencyKey ?? null,
           body: input.body,
           status: input.status,
           replyToMessageId: input.replyToMessageId ?? null,
@@ -134,6 +136,38 @@ function messageRepo(ex: Executor): MessageRepository {
         .select()
         .from(messages)
         .where(eq(messages.providerSid, input.providerSid as string))
+        .limit(1);
+      return { message: mapMessage(existing[0]!), inserted: false };
+    },
+
+    async insertReplyIntent(input) {
+      const rows = await ex
+        .insert(messages)
+        .values({
+          conversationId: input.conversationId,
+          direction: 'outbound',
+          providerSid: null,
+          idempotencyKey: input.idempotencyKey,
+          body: input.body,
+          status: 'queued',
+          replyToMessageId: input.replyToMessageId,
+          createdAt: input.now,
+          updatedAt: input.now,
+        })
+        // partial unique on (reply_to_message_id) WHERE direction='outbound'
+        .onConflictDoNothing({
+          target: messages.replyToMessageId,
+          where: sql`${messages.direction} = 'outbound'`,
+        })
+        .returning();
+
+      if (rows[0]) return { message: mapMessage(rows[0]), inserted: true };
+
+      // Another worker (or a prior attempt) already claimed the reply -> fetch it.
+      const existing = await ex
+        .select()
+        .from(messages)
+        .where(and(eq(messages.direction, 'outbound'), eq(messages.replyToMessageId, input.replyToMessageId)))
         .limit(1);
       return { message: mapMessage(existing[0]!), inserted: false };
     },
@@ -173,9 +207,10 @@ function messageRepo(ex: Executor): MessageRepository {
         .limit(1);
       return rows[0] ? mapMessage(rows[0]) : null;
     },
-    async updateStatus({ id, status, processedAt, now }) {
+    async updateStatus({ id, status, providerSid, processedAt, now }) {
       const set: Partial<MessageRow> = { status, updatedAt: now };
       if (processedAt !== undefined) set.processedAt = processedAt;
+      if (providerSid !== undefined) set.providerSid = providerSid;
       const rows = await ex.update(messages).set(set).where(eq(messages.id, id)).returning();
       return mapMessage(rows[0]!);
     },

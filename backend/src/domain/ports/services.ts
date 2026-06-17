@@ -1,7 +1,13 @@
 import type { InboundSmsEvent } from '../types';
 
 export interface SmsProvider {
-  send(input: { to: string; from: string; body: string }): Promise<{ providerSid: string; status: string }>;
+  // idempotencyKey lets the provider dedup retried sends so a crash mid-send can't double-text
+  send(input: {
+    to: string;
+    from: string;
+    body: string;
+    idempotencyKey: string;
+  }): Promise<{ providerSid: string; status: string }>;
 }
 
 export interface EnqueueOptions {

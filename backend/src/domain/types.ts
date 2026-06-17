@@ -1,6 +1,6 @@
 export type Direction = 'inbound' | 'outbound';
 
-export type MessageStatus = 'received' | 'processing' | 'sent' | 'delivered' | 'failed';
+export type MessageStatus = 'received' | 'processing' | 'queued' | 'sent' | 'delivered' | 'failed';
 
 // what the webhook puts on the queue
 export interface InboundSmsEvent {
@@ -27,6 +27,7 @@ export interface MessageRecord {
   conversationId: number;
   direction: Direction;
   providerSid: string | null;
+  idempotencyKey: string | null;
   body: string;
   status: MessageStatus;
   replyToMessageId: number | null;

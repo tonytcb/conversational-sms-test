@@ -112,6 +112,58 @@ describe('ProcessInboundMessageUseCase', () => {
     expect(ctx.sms.sent).toHaveLength(0);
   });
 
+  it('outbound reply goes queued -> sent, carrying provider_sid and the idempotency key', async () => {
+    await ctx.uc.execute(event());
+    const inbound = ctx.repos.messagesData.find((m) => m.direction === 'inbound')!;
+    const outbound = ctx.repos.messagesData.find((m) => m.direction === 'outbound')!;
+
+    expect(outbound.status).toBe('sent');
+    expect(outbound.providerSid).toBe('SMout1');
+    expect(outbound.idempotencyKey).toBe(`reply:${inbound.id}`);
+
+    const outEvents = ctx.repos.eventsData.filter((e) => e.messageId === outbound.id).map((e) => e.toStatus);
+    expect(outEvents).toEqual(['queued', 'sent']); // intent persisted before the send
+    expect(ctx.sms.sent[0]!.idempotencyKey).toBe(`reply:${inbound.id}`);
+  });
+
+  it('exactly-once: a retried send after a finalize crash never double-texts', async () => {
+    const ev = event({ providerSid: 'SMcrash' });
+    const now = new Date(ev.receivedAt);
+
+    // Reconstruct the post-crash state: inbound processing, reply intent queued, and the
+    // pre-crash send already reached the provider — but finalize never committed.
+    const conv = await ctx.repos.conversations.upsert({ participantPhone: ev.from, businessPhone: ev.to, now });
+    const { message: inbound } = await ctx.repos.messages.insertDedup({
+      conversationId: conv.id,
+      direction: 'inbound',
+      providerSid: ev.providerSid,
+      body: ev.body,
+      status: 'processing',
+      now,
+    });
+    const key = `reply:${inbound.id}`;
+    await ctx.repos.messages.insertReplyIntent({
+      conversationId: conv.id,
+      replyToMessageId: inbound.id,
+      idempotencyKey: key,
+      body: 'reply',
+      now,
+    });
+    await ctx.sms.send({ to: ev.from, from: ev.to, body: 'reply', idempotencyKey: key });
+    expect(ctx.sms.calls).toBe(1);
+
+    // The job is retried.
+    const out = await ctx.uc.execute(ev);
+    expect(out.kind).toBe('processed');
+
+    expect(ctx.sms.calls).toBe(2); // we did call the provider again...
+    expect(ctx.sms.sent).toHaveLength(1); // ...but the idempotency key deduped it -> ONE text
+    const replies = ctx.repos.messagesData.filter((m) => m.direction === 'outbound');
+    expect(replies).toHaveLength(1); // UNIQUE(reply_to) -> still one reply row
+    expect(replies[0]!.status).toBe('sent');
+    expect(ctx.repos.messagesData.find((m) => m.id === inbound.id)!.status).toBe('sent');
+  });
+
   it('does not resend if a reply already exists (retry safety)', async () => {
     const { message: inbound } = await seedInbound(ctx.repos, {
       providerSid: 'SMy',

@@ -100,43 +100,70 @@ export class ProcessInboundMessageUseCase {
     await this.deps.sleeper.sleep(delayMs);
 
     const replyBody = generateReply(inbound.body);
+    const idempotencyKey = `reply:${inbound.id}`;
 
-    // don't resend if a reply already went out (retry self-heal)
-    const existingReply = await this.deps.repos.messages.findReplyTo(inbound.id);
-    if (existingReply) {
-      await this.transition(inbound.id, 'processing', 'sent', new Date());
-      log.info({ replyId: existingReply.publicId }, 'reply already sent, skipping');
+    // 1. claim the right to reply, before any send. UNIQUE(reply_to) makes this idempotent:
+    //    a racing worker or a retry gets the already-claimed row back.
+    const intent = await this.claimReplyIntent(inbound, replyBody, idempotencyKey);
+
+    // 2. a prior attempt already finalized the send -> only ensure the inbound is marked sent.
+    if (intent.status !== 'queued') {
+      await this.markInboundSent(inbound);
+      log.info({ replyId: intent.publicId }, 'reply already sent, skipping');
       return;
     }
 
-    const sent = await this.deps.sms.send({ to: event.from, from: event.to, body: replyBody });
-    await this.recordReply(inbound, replyBody, sent.providerSid);
+    // 3. send with the deterministic key (provider dedups a retried send -> no double-text).
+    const sent = await this.deps.sms.send({ to: event.from, from: event.to, body: replyBody, idempotencyKey });
+
+    // 4. finalize: queued -> sent on the reply, mark the inbound sent, audit both.
+    await this.finalizeReply(inbound, intent.id, sent.providerSid);
     log.info({ providerSid: sent.providerSid }, 'reply sent');
   }
 
-  // one tx: persist the outbound reply AND mark the inbound sent
-  private async recordReply(inbound: MessageRecord, body: string, providerSid: string): Promise<void> {
+  // persist the outbound reply intent (status=queued, provider_sid=null) before the send
+  private async claimReplyIntent(inbound: MessageRecord, body: string, idempotencyKey: string): Promise<MessageRecord> {
+    const now = this.deps.clock.now();
+    return this.deps.txRunner.run(async (repos) => {
+      const { message, inserted } = await repos.messages.insertReplyIntent({
+        conversationId: inbound.conversationId,
+        replyToMessageId: inbound.id,
+        idempotencyKey,
+        body,
+        now,
+      });
+      if (inserted) {
+        await repos.events.append({
+          messageId: message.id,
+          fromStatus: null,
+          toStatus: 'queued',
+          metadata: { replyTo: inbound.publicId },
+          now,
+        });
+      }
+      return message;
+    });
+  }
+
+  // one tx: finalize the outbound reply (queued -> sent + provider_sid) AND mark the inbound sent
+  private async finalizeReply(inbound: MessageRecord, replyId: number, providerSid: string): Promise<void> {
     const now = this.deps.clock.now();
     await this.deps.txRunner.run(async (repos) => {
-      const { message } = await repos.messages.insertDedup({
-        conversationId: inbound.conversationId,
-        direction: 'outbound',
-        providerSid,
-        body,
-        status: 'sent',
-        replyToMessageId: inbound.id,
-        now,
-      });
-      await repos.events.append({
-        messageId: message.id,
-        fromStatus: null,
-        toStatus: 'sent',
-        metadata: { replyTo: inbound.publicId },
-        now,
-      });
+      await repos.messages.updateStatus({ id: replyId, status: 'sent', providerSid, processedAt: now, now });
+      await repos.events.append({ messageId: replyId, fromStatus: 'queued', toStatus: 'sent', now });
       await repos.messages.updateStatus({ id: inbound.id, status: 'sent', processedAt: now, now });
       await repos.events.append({ messageId: inbound.id, fromStatus: 'processing', toStatus: 'sent', now });
       await repos.conversations.touch(inbound.conversationId, now);
+    });
+  }
+
+  // idempotent: mark the inbound sent if a prior attempt already sent the reply
+  private async markInboundSent(inbound: MessageRecord): Promise<void> {
+    if (inbound.status === 'sent') return;
+    const now = this.deps.clock.now();
+    await this.deps.txRunner.run(async (repos) => {
+      await repos.messages.updateStatus({ id: inbound.id, status: 'sent', processedAt: now, now });
+      await repos.events.append({ messageId: inbound.id, fromStatus: inbound.status, toStatus: 'sent', now });
     });
   }
 

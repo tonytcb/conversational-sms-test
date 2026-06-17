@@ -9,7 +9,12 @@ export interface TwilioConfig {
 export class TwilioSmsProvider implements SmsProvider {
   constructor(private readonly cfg: TwilioConfig) {}
 
-  async send(input: { to: string; from: string; body: string }): Promise<{ providerSid: string; status: string }> {
+  async send(input: {
+    to: string;
+    from: string;
+    body: string;
+    idempotencyKey: string;
+  }): Promise<{ providerSid: string; status: string }> {
     const url = `${this.cfg.baseUrl}/2010-04-01/Accounts/${this.cfg.accountSid}/Messages.json`;
     const form = new URLSearchParams({ To: input.to, From: input.from, Body: input.body });
 
@@ -19,6 +24,10 @@ export class TwilioSmsProvider implements SmsProvider {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         Authorization: `Basic ${auth}`,
+        // Provider-side send dedup. Twilio's Create Message has no first-class idempotency
+        // key today; forwarded for providers that honor it (see docs/PRODUCTION-HARDENING.md
+        // §A.4 for the reconciliation fallback when the provider ignores it).
+        'I-Twilio-Idempotency-Token': input.idempotencyKey,
       },
       body: form.toString(),
     });

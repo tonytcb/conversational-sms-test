@@ -97,6 +97,51 @@ describe('end-to-end flow against real Postgres + Redis', () => {
     expect(rows).toHaveLength(2);
   });
 
+  it('persists the outbound reply with provider_sid and idempotency key (exactly-once send)', async () => {
+    const { uc } = buildUseCase();
+    await uc.execute(event({ providerSid: 'SMidem' }));
+
+    const { rows } = await dbh.pool.query(
+      "SELECT status, provider_sid, idempotency_key FROM messages WHERE direction = 'outbound'",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('sent');
+    expect(rows[0].provider_sid).toMatch(/^SMout/);
+    expect(rows[0].idempotency_key).toMatch(/^reply:/);
+  });
+
+  it('reply intent is idempotent under concurrency — exactly one outbound row (UNIQUE reply_to)', async () => {
+    const { repos } = buildUseCase();
+    const now = new Date();
+    const conv = await repos.conversations.upsert({
+      participantPhone: '+15557770002',
+      businessPhone: '+15550000000',
+      now,
+    });
+    const { message: inbound } = await repos.messages.insertDedup({
+      conversationId: conv.id,
+      direction: 'inbound',
+      providerSid: 'SMrace1',
+      body: 'hi',
+      status: 'processing',
+      now,
+    });
+    const key = `reply:${inbound.id}`;
+
+    // two workers race to claim the reply for the same inbound
+    const results = await Promise.all([
+      repos.messages.insertReplyIntent({ conversationId: conv.id, replyToMessageId: inbound.id, idempotencyKey: key, body: 'r', now }),
+      repos.messages.insertReplyIntent({ conversationId: conv.id, replyToMessageId: inbound.id, idempotencyKey: key, body: 'r', now }),
+    ]);
+
+    expect(results.filter((r) => r.inserted)).toHaveLength(1); // exactly one winner
+    const { rows } = await dbh.pool.query(
+      "SELECT count(*)::int AS n FROM messages WHERE direction = 'outbound' AND reply_to_message_id = $1",
+      [inbound.id],
+    );
+    expect(rows[0].n).toBe(1);
+  });
+
   it('returns conversation messages in chronological order', async () => {
     const { uc, repos } = buildUseCase();
     await uc.execute(event({ providerSid: 'SMseqA', body: 'first' }));
