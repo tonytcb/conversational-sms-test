@@ -147,6 +147,9 @@ await queue.add(INBOUND_JOB, event, { group: { id: convKey }, jobId: providerSid
 **Kafka / Kinesis (heavier):** produce with `key = convKey`; one consumer per
 partition reads in offset order.
 
+> Why the requeue only goes away at the transport, and a full BullMQ-Pro vs Kafka vs
+> Pub/Sub trade-off, are in [`TRANSPORT-COMPARISON.md`](./TRANSPORT-COMPARISON.md).
+
 ### B.2 What gets deleted
 
 - `backend/src/infrastructure/lock/redis-lock.ts` — no longer needed for ordering.
