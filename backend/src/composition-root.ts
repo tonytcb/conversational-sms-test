@@ -70,6 +70,7 @@ export function createContainer(env: Env, service: string): Container {
       processingMaxMs: env.PROCESSING_MAX_MS,
       lockTtlMs: env.CONVERSATION_LOCK_TTL_MS,
       requeueDelayMs: REQUEUE_DELAY_MS,
+      coalesceBurst: env.COALESCE_BURST,
     },
   });
   const queries = new Queries(repos);

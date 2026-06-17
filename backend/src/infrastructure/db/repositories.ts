@@ -210,6 +210,20 @@ function messageRepo(ex: Executor): MessageRepository {
         .limit(1);
       return rows[0] ? mapMessage(rows[0]) : null;
     },
+    async listUnprocessedInbound(conversationId) {
+      const rows = await ex
+        .select()
+        .from(messages)
+        .where(
+          and(
+            eq(messages.conversationId, conversationId),
+            eq(messages.direction, 'inbound'),
+            inArray(messages.status, ['received', 'processing']),
+          ),
+        )
+        .orderBy(asc(messages.seq), asc(messages.createdAt), asc(messages.id));
+      return rows.map(mapMessage);
+    },
     async updateStatus({ id, status, providerSid, processedAt, now }) {
       const set: Partial<MessageRow> = { status, updatedAt: now };
       if (processedAt !== undefined) set.processedAt = processedAt;

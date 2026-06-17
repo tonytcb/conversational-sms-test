@@ -17,7 +17,13 @@ export interface ProcessInboundMessageDeps {
   clock: Clock;
   sleeper: Sleeper;
   logger: Logger;
-  config: { processingMinMs: number; processingMaxMs: number; lockTtlMs: number; requeueDelayMs: number };
+  config: {
+    processingMinMs: number;
+    processingMaxMs: number;
+    lockTtlMs: number;
+    requeueDelayMs: number;
+    coalesceBurst: boolean; // batch a conversation's pending inbounds into one reply (hot-conversation throughput)
+  };
 }
 
 // lock conversation -> persist (dedup) -> ensure next in order -> reply -> sent
@@ -92,24 +98,33 @@ export class ProcessInboundMessageUseCase {
   }
 
   private async process(event: InboundSmsEvent, inbound: MessageRecord, log: Logger): Promise<void> {
-    if (inbound.status === 'received') {
-      await this.transition(inbound.id, 'received', 'processing');
+    // Hot-conversation throughput: under burst coalescing, answer all of a conversation's
+    // pending inbounds with ONE reply. We hold the conversation lock, so the batch is stable.
+    // The reply links to the latest message in the batch (highest seq); the others are marked
+    // sent without their own reply. Off -> batch is just [inbound] (one reply per message).
+    const batch = this.deps.config.coalesceBurst
+      ? await this.deps.repos.messages.listUnprocessedInbound(inbound.conversationId)
+      : [inbound];
+    const target = batch[batch.length - 1] ?? inbound; // latest seq answers the burst
+
+    for (const m of batch) {
+      if (m.status === 'received') await this.transition(m.id, 'received', 'processing');
     }
 
     const delayMs = this.randomDelay();
-    log.info({ messageId: inbound.publicId, delayMs }, 'processing message');
+    log.info({ messageId: target.publicId, batchSize: batch.length, delayMs }, 'processing message');
     await this.deps.sleeper.sleep(delayMs);
 
-    const replyBody = generateReply(inbound.body);
-    const idempotencyKey = `reply:${inbound.id}`;
+    const replyBody = generateReply(batch.map((m) => m.body).join('\n'));
+    const idempotencyKey = `reply:${target.id}`;
 
     // 1. claim the right to reply, before any send. UNIQUE(reply_to) makes this idempotent:
     //    a racing worker or a retry gets the already-claimed row back.
-    const intent = await this.claimReplyIntent(inbound, replyBody, idempotencyKey);
+    const intent = await this.claimReplyIntent(target, replyBody, idempotencyKey);
 
-    // 2. a prior attempt already finalized the send -> only ensure the inbound is marked sent.
+    // 2. a prior attempt already finalized the send -> only ensure the batch is marked sent.
     if (intent.status !== 'queued') {
-      await this.markInboundSent(inbound);
+      await this.markBatchSent(batch);
       log.info({ replyId: intent.publicId }, 'reply already sent, skipping');
       return;
     }
@@ -117,9 +132,9 @@ export class ProcessInboundMessageUseCase {
     // 3. send with the deterministic key (provider dedups a retried send -> no double-text).
     const sent = await this.deps.sms.send({ to: event.from, from: event.to, body: replyBody, idempotencyKey });
 
-    // 4. finalize: queued -> sent on the reply, mark the inbound sent, audit both.
-    await this.finalizeReply(inbound, intent.id, sent.providerSid);
-    log.info({ providerSid: sent.providerSid }, 'reply sent');
+    // 4. finalize: queued -> sent on the reply, mark every batched inbound sent, audit all.
+    await this.finalizeReply(target, intent.id, sent.providerSid, batch);
+    log.info({ providerSid: sent.providerSid, batchSize: batch.length }, 'reply sent');
   }
 
   // persist the outbound reply intent (status=queued, provider_sid=null) before the send
@@ -146,25 +161,35 @@ export class ProcessInboundMessageUseCase {
     });
   }
 
-  // one tx: finalize the outbound reply (queued -> sent + provider_sid) AND mark the inbound sent
-  private async finalizeReply(inbound: MessageRecord, replyId: number, providerSid: string): Promise<void> {
+  // one tx: finalize the outbound reply (queued -> sent + provider_sid) AND mark every batched inbound sent
+  private async finalizeReply(
+    target: MessageRecord,
+    replyId: number,
+    providerSid: string,
+    batch: MessageRecord[],
+  ): Promise<void> {
     const now = this.deps.clock.now();
     await this.deps.txRunner.run(async (repos) => {
       await repos.messages.updateStatus({ id: replyId, status: 'sent', providerSid, processedAt: now, now });
       await repos.events.append({ messageId: replyId, fromStatus: 'queued', toStatus: 'sent', now });
-      await repos.messages.updateStatus({ id: inbound.id, status: 'sent', processedAt: now, now });
-      await repos.events.append({ messageId: inbound.id, fromStatus: 'processing', toStatus: 'sent', now });
-      await repos.conversations.touch(inbound.conversationId, now);
+      for (const m of batch) {
+        await repos.messages.updateStatus({ id: m.id, status: 'sent', processedAt: now, now });
+        await repos.events.append({ messageId: m.id, fromStatus: 'processing', toStatus: 'sent', now });
+      }
+      await repos.conversations.touch(target.conversationId, now);
     });
   }
 
-  // idempotent: mark the inbound sent if a prior attempt already sent the reply
-  private async markInboundSent(inbound: MessageRecord): Promise<void> {
-    if (inbound.status === 'sent') return;
+  // idempotent: mark every batched inbound sent if a prior attempt already sent the reply
+  private async markBatchSent(batch: MessageRecord[]): Promise<void> {
+    const pending = batch.filter((m) => m.status !== 'sent');
+    if (pending.length === 0) return;
     const now = this.deps.clock.now();
     await this.deps.txRunner.run(async (repos) => {
-      await repos.messages.updateStatus({ id: inbound.id, status: 'sent', processedAt: now, now });
-      await repos.events.append({ messageId: inbound.id, fromStatus: inbound.status, toStatus: 'sent', now });
+      for (const m of pending) {
+        await repos.messages.updateStatus({ id: m.id, status: 'sent', processedAt: now, now });
+        await repos.events.append({ messageId: m.id, fromStatus: m.status, toStatus: 'sent', now });
+      }
     });
   }
 

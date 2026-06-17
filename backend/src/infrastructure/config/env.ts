@@ -19,6 +19,11 @@ const schema = z.object({
   PROCESSING_MAX_MS: z.coerce.number().int().positive().default(15000),
   QUEUE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   CONVERSATION_LOCK_TTL_MS: z.coerce.number().int().positive().default(30000),
+  // hot-conversation throughput: answer a conversation's pending inbound burst with one reply
+  COALESCE_BURST: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof schema>;

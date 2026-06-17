@@ -10,9 +10,15 @@ import {
   silentLogger,
 } from '../support/fakes';
 
-const config = { processingMinMs: 0, processingMaxMs: 0, lockTtlMs: 30000, requeueDelayMs: 500 };
+const config = {
+  processingMinMs: 0,
+  processingMaxMs: 0,
+  lockTtlMs: 30000,
+  requeueDelayMs: 500,
+  coalesceBurst: false,
+};
 
-function build() {
+function build(overrides: Partial<typeof config> = {}) {
   const repos = new InMemoryRepositories();
   const sms = new FakeSmsProvider();
   const lock = new FakeLock();
@@ -24,7 +30,7 @@ function build() {
     clock: new FakeClock(),
     sleeper: new FakeSleeper(),
     logger: silentLogger,
-    config,
+    config: { ...config, ...overrides },
   });
   return { uc, repos, sms, lock };
 }
@@ -168,6 +174,35 @@ describe('ProcessInboundMessageUseCase', () => {
     expect(replies).toHaveLength(1); // UNIQUE(reply_to) -> still one reply row
     expect(replies[0]!.status).toBe('sent');
     expect(ctx.repos.messagesData.find((m) => m.id === inbound.id)!.status).toBe('sent');
+  });
+
+  it('coalesces a conversation burst into a single reply (hot-conversation throughput)', async () => {
+    const c = build({ coalesceBurst: true });
+    // a second message in the burst has already arrived and is pending
+    await seedInbound(c.repos, {
+      providerSid: 'SMb2',
+      body: 'second part',
+      status: 'received',
+      receivedAt: '2026-06-12T12:00:01.000Z',
+      seq: 2,
+    });
+    // the head of the burst is processed now
+    const out = await c.uc.execute(event({ providerSid: 'SMb1', body: 'first part', seq: 1 }));
+    expect(out.kind).toBe('processed');
+
+    // ONE reply answers the whole burst...
+    expect(c.sms.sent).toHaveLength(1);
+    const replies = c.repos.messagesData.filter((m) => m.direction === 'outbound');
+    expect(replies).toHaveLength(1);
+
+    // ...and every inbound in the burst is marked sent
+    const inbounds = c.repos.messagesData.filter((m) => m.direction === 'inbound');
+    expect(inbounds).toHaveLength(2);
+    expect(inbounds.every((m) => m.status === 'sent')).toBe(true);
+
+    // the reply links to the latest message in the burst (highest seq)
+    const msg2 = inbounds.find((m) => m.providerSid === 'SMb2')!;
+    expect(replies[0]!.replyToMessageId).toBe(msg2.id);
   });
 
   it('does not resend if a reply already exists (retry safety)', async () => {

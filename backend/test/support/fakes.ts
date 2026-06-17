@@ -171,6 +171,21 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
           );
         return candidates[0] ? { ...candidates[0] } : null;
       },
+      listUnprocessedInbound: async (conversationId) =>
+        this.messagesData
+          .filter(
+            (m) =>
+              m.conversationId === conversationId &&
+              m.direction === 'inbound' &&
+              (m.status === 'received' || m.status === 'processing'),
+          )
+          .sort(
+            (a, b) =>
+              (a.seq ?? Number.POSITIVE_INFINITY) - (b.seq ?? Number.POSITIVE_INFINITY) ||
+              a.createdAt.getTime() - b.createdAt.getTime() ||
+              a.id - b.id,
+          )
+          .map((m) => ({ ...m })),
       updateStatus: async ({ id, status, providerSid, processedAt, now }) => {
         const m = this.messagesData.find((x) => x.id === id)!;
         m.status = status;

@@ -221,8 +221,14 @@ flowchart TD
 
 ### C.4 Multipliers
 
-- **Burst coalescing (debounce).** Hold a short window; batch a conversation's
-  pending inbounds into **one** reply. Natural for SMS, biggest hot-conversation win.
+- **Burst coalescing — implemented (`COALESCE_BURST`).** When on, the worker answers
+  a conversation's pending inbound burst with **one** reply: holding the conversation
+  lock it reads all `received|processing` inbounds in `seq` order
+  (`listUnprocessedInbound`), generates a single reply from the joined bodies, links
+  it to the latest message in the burst (the §A intent/idempotency path is unchanged),
+  and marks every batched inbound `sent`. Off → one reply per message (default).
+  Natural for SMS and the biggest hot-conversation win; the full debounce-window
+  variant (wait N ms to let a burst accumulate) layers on top.
 - **Bounded sharding (last resort).** A group past a depth threshold is sharded into
   K sub-lanes by hash → bounded parallelism with a **logged, explicit** ordering
   relaxation. Never silent.

@@ -51,6 +51,9 @@ export interface MessageRepository {
   // oldest received|processing inbound — the head that may be processed next
   findEarliestUnprocessedInbound(conversationId: number): Promise<MessageRecord | null>;
 
+  // all received|processing inbound in seq order — the burst answered by one coalesced reply
+  listUnprocessedInbound(conversationId: number): Promise<MessageRecord[]>;
+
   updateStatus(input: {
     id: number;
     status: MessageStatus;

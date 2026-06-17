@@ -40,20 +40,27 @@ beforeEach(async () => {
   await dbh.pool.query('TRUNCATE message_events, messages, conversations RESTART IDENTITY CASCADE');
 });
 
-function buildUseCase() {
+function buildUseCase(opts: { coalesceBurst?: boolean } = {}) {
   const repos = buildRepositories(dbh.db);
   const txRunner = new DrizzleTransactionRunner(dbh.db);
+  const sms = new FakeSmsProvider();
   const uc = new ProcessInboundMessageUseCase({
     txRunner,
     repos,
-    sms: new FakeSmsProvider(),
+    sms,
     lock: new RedisLock(redis),
     clock: systemClock,
     sleeper: new FakeSleeper(),
     logger: silentLogger,
-    config: { processingMinMs: 0, processingMaxMs: 0, lockTtlMs: 30000, requeueDelayMs: 500 },
+    config: {
+      processingMinMs: 0,
+      processingMaxMs: 0,
+      lockTtlMs: 30000,
+      requeueDelayMs: 500,
+      coalesceBurst: opts.coalesceBurst ?? false,
+    },
   });
-  return { uc, repos, queries: new Queries(repos) };
+  return { uc, repos, sms, queries: new Queries(repos) };
 }
 
 const event = (overrides = {}) => ({
@@ -168,6 +175,38 @@ describe('end-to-end flow against real Postgres + Redis', () => {
 
     const { rows } = await dbh.pool.query("SELECT count(*)::int AS n FROM messages WHERE direction = 'outbound'");
     expect(rows[0].n).toBe(0);
+  });
+
+  it('coalesces a conversation burst into one reply (hot-conversation throughput)', async () => {
+    const { uc, repos } = buildUseCase({ coalesceBurst: true });
+    const now = new Date();
+    const conv = await repos.conversations.upsert({
+      participantPhone: '+15557770004',
+      businessPhone: '+15550000000',
+      now,
+    });
+    // a later message of the burst is already persisted and pending
+    await repos.messages.insertDedup({
+      conversationId: conv.id,
+      seq: 2,
+      direction: 'inbound',
+      providerSid: 'SMburst2',
+      body: 'part two',
+      status: 'received',
+      now,
+    });
+
+    // process the head of the burst
+    const out = await uc.execute(event({ providerSid: 'SMburst1', from: '+15557770004', body: 'part one', seq: 1 }));
+    expect(out.kind).toBe('processed');
+
+    const { rows: replies } = await dbh.pool.query("SELECT count(*)::int AS n FROM messages WHERE direction = 'outbound'");
+    expect(replies[0].n).toBe(1); // one reply for the whole burst
+
+    const { rows: inbound } = await dbh.pool.query(
+      "SELECT count(*)::int AS n FROM messages WHERE direction = 'inbound' AND status = 'sent'",
+    );
+    expect(inbound[0].n).toBe(2); // both inbound messages marked sent
   });
 
   it('returns conversation messages in chronological order', async () => {
