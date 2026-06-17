@@ -1,10 +1,11 @@
 import { InvalidInboundEventError } from '../domain/errors';
-import type { InboundQueue, Logger } from '../domain/ports/services';
+import type { InboundQueue, Logger, SequenceAllocator } from '../domain/ports/services';
 import type { InboundSmsEvent } from '../domain/types';
 import { PhoneNumber } from '../domain/value-objects/phone-number';
 
 export interface ReceiveInboundSmsDeps {
   queue: InboundQueue;
+  seqAllocator: SequenceAllocator;
   logger: Logger;
 }
 
@@ -28,17 +29,21 @@ export class ReceiveInboundSmsUseCase {
     const from = PhoneNumber.parse(raw.from);
     const to = PhoneNumber.parse(raw.to);
 
+    // allocate receive-order seq per conversation (one atomic Redis INCR, no DB)
+    const seq = await this.deps.seqAllocator.next(`${to.value}:${from.value}`);
+
     const event: InboundSmsEvent = {
       providerSid,
       from: from.value,
       to: to.value,
       body: raw.body ?? '',
       receivedAt: raw.receivedAt,
+      seq,
     };
 
     // jobId = providerSid, so duplicate deliveries collapse at the queue
     await this.deps.queue.enqueue(event, { jobId: providerSid });
-    this.deps.logger.info({ providerSid, from: event.from, to: event.to }, 'inbound SMS enqueued');
+    this.deps.logger.info({ providerSid, seq, from: event.from, to: event.to }, 'inbound SMS enqueued');
 
     return { providerSid };
   }

@@ -19,6 +19,12 @@ export interface InboundQueue {
   enqueue(event: InboundSmsEvent, opts?: EnqueueOptions): Promise<void>;
 }
 
+// monotonic per-conversation counter, allocated at receive time so `seq` reflects
+// webhook receive-order independent of clock precision or out-of-order job pickup
+export interface SequenceAllocator {
+  next(key: string): Promise<number>;
+}
+
 export interface Clock {
   now(): Date;
 }

@@ -36,13 +36,14 @@ function event(overrides: Partial<InboundSmsEvent> = {}): InboundSmsEvent {
     to: '+15550000000',
     body: 'hello there',
     receivedAt: '2026-06-12T12:00:00.000Z',
+    seq: 1,
     ...overrides,
   };
 }
 
 async function seedInbound(
   repos: InMemoryRepositories,
-  opts: { providerSid: string; body: string; status: 'received' | 'processing'; receivedAt: string },
+  opts: { providerSid: string; body: string; status: 'received' | 'processing'; receivedAt: string; seq?: number },
 ) {
   const now = new Date(opts.receivedAt);
   const conv = await repos.conversations.upsert({
@@ -52,6 +53,7 @@ async function seedInbound(
   });
   const { message } = await repos.messages.insertDedup({
     conversationId: conv.id,
+    seq: opts.seq ?? null,
     direction: 'inbound',
     providerSid: opts.providerSid,
     body: opts.body,
@@ -98,14 +100,18 @@ describe('ProcessInboundMessageUseCase', () => {
     expect(ctx.repos.messagesData).toHaveLength(0);
   });
 
-  it('requeues a message that is not next in order (ordering)', async () => {
+  it('requeues a message that is not next in order — ordering by seq', async () => {
+    // earlier message has a LOWER seq but a LATER createdAt: proves seq (not the clock) drives order
     await seedInbound(ctx.repos, {
       providerSid: 'SMearlier',
       body: 'first',
       status: 'received',
-      receivedAt: '2026-06-12T11:59:00.000Z',
+      receivedAt: '2026-06-12T12:05:00.000Z',
+      seq: 1,
     });
-    const out = await ctx.uc.execute(event({ providerSid: 'SMlater', receivedAt: '2026-06-12T12:00:00.000Z' }));
+    const out = await ctx.uc.execute(
+      event({ providerSid: 'SMlater', receivedAt: '2026-06-12T12:00:00.000Z', seq: 2 }),
+    );
     expect(out).toEqual({ kind: 'requeue', delayMs: 500 });
     const later = ctx.repos.messagesData.find((m) => m.providerSid === 'SMlater')!;
     expect(later.status).toBe('received'); // persisted but not processed

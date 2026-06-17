@@ -1,0 +1,2 @@
+ALTER TABLE "messages" ADD COLUMN "seq" bigint;--> statement-breakpoint
+CREATE UNIQUE INDEX "messages_conversation_seq_uq" ON "messages" USING btree ("conversation_id","seq") WHERE "messages"."seq" is not null;

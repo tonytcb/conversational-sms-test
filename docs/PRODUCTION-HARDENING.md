@@ -179,14 +179,25 @@ on a hot number, split the cheap-ordered step from the heavy-parallel step.
 ### C.1 Sequence at ingest (cheap, ordered)
 
 ```sql
-ALTER TABLE conversations ADD COLUMN last_seq bigint NOT NULL DEFAULT 0;
-ALTER TABLE messages      ADD COLUMN seq      bigint;
-CREATE UNIQUE INDEX messages_conv_seq_uq ON messages (conversation_id, seq);
+ALTER TABLE messages ADD COLUMN seq bigint;
+CREATE UNIQUE INDEX messages_conversation_seq_uq
+  ON messages (conversation_id, seq) WHERE seq IS NOT NULL;
 ```
 
-In the ingest tx (`persistInbound`): `UPDATE conversations SET last_seq = last_seq +
-1 ... RETURNING last_seq` and stamp it onto `messages.seq`. This is the only strictly
-serial work — microseconds.
+**Implemented (migration 0002).** `seq` is allocated at **receive time** by a single
+atomic Redis `INCR seq:{to}:{from}` (the `SequenceAllocator` port,
+`infrastructure/sequence/redis-sequence.ts`), carried on the queue job, and stamped
+onto `messages.seq` when the worker persists the inbound. Allocating at receive — not
+in the worker — is what makes `seq` reflect true webhook receive-order even when jobs
+are picked up out of order; doing it in Redis keeps the webhook hot path DB-free (the
+5s budget is never at risk). Gaps from deduped duplicate deliveries are fine — only
+relative order matters. The worker's head check now orders by `seq` (deterministic,
+clock-skew-free) instead of `created_at`.
+
+> A DB-side counter (`conversations.last_seq` bumped in the ingest tx) is the
+> equivalent if you move inbound persistence into the webhook request (the full
+> transactional-outbox variant). Redis `INCR` is chosen here to keep the hot path off
+> Postgres.
 
 ### C.2 Process in parallel (unordered)
 

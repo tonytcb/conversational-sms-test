@@ -47,6 +47,8 @@ export const messages = pgTable(
     conversationId: bigint('conversation_id', { mode: 'number' })
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
+    // per-conversation receive-order sequence (inbound only); deterministic ordering key
+    seq: bigint('seq', { mode: 'number' }),
     direction: directionEnum('direction').notNull(),
     // Twilio MessageSid. UNIQUE -> idempotency key for duplicate deliveries.
     providerSid: text('provider_sid'),
@@ -73,6 +75,10 @@ export const messages = pgTable(
     uniqueIndex('messages_idempotency_key_uq')
       .on(t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
+    // deterministic receive-order per conversation; one row per (conversation, seq)
+    uniqueIndex('messages_conversation_seq_uq')
+      .on(t.conversationId, t.seq)
+      .where(sql`${t.seq} is not null`),
     index('messages_conversation_created_idx').on(t.conversationId, t.createdAt),
     index('messages_status_idx').on(t.status),
   ],

@@ -11,6 +11,7 @@ import { RedisLock } from './infrastructure/lock/redis-lock';
 import { createLogger } from './infrastructure/observability/logger';
 import { BullInboundQueue } from './infrastructure/queue/inbound-queue';
 import { createRedis } from './infrastructure/redis';
+import { RedisSequenceAllocator } from './infrastructure/sequence/redis-sequence';
 import { TwilioSmsProvider } from './infrastructure/sms/twilio-provider';
 import { systemClock, realSleeper } from './infrastructure/system/adapters';
 
@@ -47,6 +48,7 @@ export function createContainer(env: Env, service: string): Container {
 
   const queue = new BullInboundQueue(queueConnection, { maxAttempts: env.QUEUE_MAX_ATTEMPTS });
   const lock = new RedisLock(lockConnection);
+  const seqAllocator = new RedisSequenceAllocator(lockConnection);
 
   const sms = new TwilioSmsProvider({
     baseUrl: env.TWILIO_API_BASE_URL,
@@ -54,7 +56,7 @@ export function createContainer(env: Env, service: string): Container {
     authToken: env.TWILIO_AUTH_TOKEN,
   });
 
-  const receiveInboundSms = new ReceiveInboundSmsUseCase({ queue, logger });
+  const receiveInboundSms = new ReceiveInboundSmsUseCase({ queue, seqAllocator, logger });
   const processInbound = new ProcessInboundMessageUseCase({
     txRunner,
     repos,

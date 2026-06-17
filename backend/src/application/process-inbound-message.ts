@@ -72,11 +72,12 @@ export class ProcessInboundMessageUseCase {
 
       const { message } = await repos.messages.insertDedup({
         conversationId: conversation.id,
+        seq: event.seq, // receive-order sequence, allocated on the hot path
         direction: 'inbound',
         providerSid: event.providerSid,
         body: event.body,
         status: 'received',
-        now: receivedAt, // createdAt = received time, used for ordering
+        now: receivedAt, // createdAt = received time, legacy ordering fallback
       });
       await repos.events.append({
         messageId: message.id,

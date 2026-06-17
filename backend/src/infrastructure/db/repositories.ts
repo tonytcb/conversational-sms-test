@@ -30,6 +30,7 @@ function mapMessage(r: MessageRow): MessageRecord {
     id: r.id,
     publicId: r.publicId,
     conversationId: r.conversationId,
+    seq: r.seq,
     direction: r.direction,
     providerSid: r.providerSid,
     idempotencyKey: r.idempotencyKey,
@@ -117,6 +118,7 @@ function messageRepo(ex: Executor): MessageRepository {
         .insert(messages)
         .values({
           conversationId: input.conversationId,
+          seq: input.seq ?? null,
           direction: input.direction,
           providerSid: input.providerSid,
           idempotencyKey: input.idempotencyKey ?? null,
@@ -203,7 +205,8 @@ function messageRepo(ex: Executor): MessageRepository {
             inArray(messages.status, ['received', 'processing']),
           ),
         )
-        .orderBy(asc(messages.createdAt), asc(messages.id))
+        // receive-order by seq (deterministic); createdAt/id as legacy fallback for null seq
+        .orderBy(asc(messages.seq), asc(messages.createdAt), asc(messages.id))
         .limit(1);
       return rows[0] ? mapMessage(rows[0]) : null;
     },

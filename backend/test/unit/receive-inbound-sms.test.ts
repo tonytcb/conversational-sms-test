@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ReceiveInboundSmsUseCase } from '../../src/application/receive-inbound-sms';
 import { InvalidInboundEventError } from '../../src/domain/errors';
-import { FakeQueue, silentLogger } from '../support/fakes';
+import { FakeQueue, FakeSequenceAllocator, silentLogger } from '../support/fakes';
 
 function build() {
   const queue = new FakeQueue();
-  const uc = new ReceiveInboundSmsUseCase({ queue, logger: silentLogger });
+  const seqAllocator = new FakeSequenceAllocator();
+  const uc = new ReceiveInboundSmsUseCase({ queue, seqAllocator, logger: silentLogger });
   return { uc, queue };
 }
 
@@ -24,6 +25,14 @@ describe('ReceiveInboundSmsUseCase (hot path)', () => {
     expect(queue.enqueued).toHaveLength(1);
     expect(queue.enqueued[0]!.opts?.jobId).toBe('SM123');
     expect(queue.enqueued[0]!.event.from).toBe('+15551230000');
+    expect(queue.enqueued[0]!.event.seq).toBe(1); // receive-order seq allocated on the hot path
+  });
+
+  it('allocates a monotonic per-conversation seq across deliveries', async () => {
+    const { uc, queue } = build();
+    await uc.execute(base);
+    await uc.execute({ ...base, providerSid: 'SM124' });
+    expect(queue.enqueued.map((e) => e.event.seq)).toEqual([1, 2]);
   });
 
   const invalidCases = [

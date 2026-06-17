@@ -15,6 +15,13 @@
       "when": 1781727683078,
       "tag": "0001_exactly_once_send",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781729061219,
+      "tag": "0002_ordering_seq",
+      "breakpoints": true
     }
   ]
 }

@@ -14,6 +14,7 @@ export interface ConversationRepository {
 
 export interface InsertMessageInput {
   conversationId: number;
+  seq?: number | null;
   direction: Direction;
   providerSid: string | null;
   idempotencyKey?: string | null;

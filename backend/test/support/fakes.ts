@@ -13,6 +13,7 @@ import type {
   InboundQueue,
   LockHandle,
   Logger,
+  SequenceAllocator,
   Sleeper,
   SmsProvider,
 } from '../../src/domain/ports/services';
@@ -97,6 +98,7 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
           id: ++this.msgSeq,
           publicId: `msg-${this.msgSeq}`,
           conversationId: input.conversationId,
+          seq: input.seq ?? null,
           direction: input.direction,
           providerSid: input.providerSid,
           idempotencyKey: input.idempotencyKey ?? null,
@@ -120,6 +122,7 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
           id: ++this.msgSeq,
           publicId: `msg-${this.msgSeq}`,
           conversationId: input.conversationId,
+          seq: null,
           direction: 'outbound',
           providerSid: null,
           idempotencyKey: input.idempotencyKey,
@@ -159,7 +162,13 @@ export class InMemoryRepositories implements Repositories, TransactionRunner {
               m.direction === 'inbound' &&
               (m.status === 'received' || m.status === 'processing'),
           )
-          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id - b.id);
+          // receive-order by seq (deterministic); createdAt/id fallback for null seq
+          .sort(
+            (a, b) =>
+              (a.seq ?? Number.POSITIVE_INFINITY) - (b.seq ?? Number.POSITIVE_INFINITY) ||
+              a.createdAt.getTime() - b.createdAt.getTime() ||
+              a.id - b.id,
+          );
         return candidates[0] ? { ...candidates[0] } : null;
       },
       updateStatus: async ({ id, status, providerSid, processedAt, now }) => {
@@ -242,6 +251,15 @@ export class FakeSmsProvider implements SmsProvider {
     this.byKey.set(input.idempotencyKey, result);
     this.sent.push(input);
     return result;
+  }
+}
+
+export class FakeSequenceAllocator implements SequenceAllocator {
+  private counters = new Map<string, number>();
+  async next(key: string): Promise<number> {
+    const n = (this.counters.get(key) ?? 0) + 1;
+    this.counters.set(key, n);
+    return n;
   }
 }
 

@@ -62,6 +62,7 @@ const event = (overrides = {}) => ({
   to: '+15550000000',
   body: 'integration hello',
   receivedAt: new Date().toISOString(),
+  seq: 1,
   ...overrides,
 });
 
@@ -142,10 +143,37 @@ describe('end-to-end flow against real Postgres + Redis', () => {
     expect(rows[0].n).toBe(1);
   });
 
+  it('processes a later seq only after the earlier seq (ordering by seq)', async () => {
+    const { uc, repos } = buildUseCase();
+    const now = new Date();
+    const conv = await repos.conversations.upsert({
+      participantPhone: '+15557770003',
+      businessPhone: '+15550000000',
+      now,
+    });
+    // seq 1 has arrived and is persisted but still unprocessed (in flight elsewhere)
+    await repos.messages.insertDedup({
+      conversationId: conv.id,
+      seq: 1,
+      direction: 'inbound',
+      providerSid: 'SMo1',
+      body: 'first',
+      status: 'received',
+      now,
+    });
+
+    // seq 2 is picked first -> it is not the earliest unprocessed -> requeue, no reply
+    const out = await uc.execute(event({ providerSid: 'SMo2', from: '+15557770003', body: 'second', seq: 2 }));
+    expect(out.kind).toBe('requeue');
+
+    const { rows } = await dbh.pool.query("SELECT count(*)::int AS n FROM messages WHERE direction = 'outbound'");
+    expect(rows[0].n).toBe(0);
+  });
+
   it('returns conversation messages in chronological order', async () => {
     const { uc, repos } = buildUseCase();
-    await uc.execute(event({ providerSid: 'SMseqA', body: 'first' }));
-    await uc.execute(event({ providerSid: 'SMseqB', body: 'second' }));
+    await uc.execute(event({ providerSid: 'SMseqA', body: 'first', seq: 1 }));
+    await uc.execute(event({ providerSid: 'SMseqB', body: 'second', seq: 2 }));
     const rows = await repos.messages.listByConversationId(1);
     expect(rows.map((r) => r.direction)).toEqual(['inbound', 'outbound', 'inbound', 'outbound']);
     expect(rows.map((r) => r.body)).toEqual([

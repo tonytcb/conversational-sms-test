@@ -9,6 +9,7 @@ export interface InboundSmsEvent {
   to: string; // our business phone (E.164)
   body: string;
   receivedAt: string;
+  seq: number; // per-conversation receive-order sequence (allocated on the hot path)
 }
 
 // internal records — numeric id stays inside, never hits the API
@@ -25,6 +26,7 @@ export interface MessageRecord {
   id: number;
   publicId: string;
   conversationId: number;
+  seq: number | null; // per-conversation receive-order; null for outbound replies
   direction: Direction;
   providerSid: string | null;
   idempotencyKey: string | null;
