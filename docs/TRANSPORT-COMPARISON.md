@@ -1,7 +1,7 @@
-# Queue Transport Comparison — BullMQ/Redis vs Kafka vs Google Pub/Sub
+# Queue Transport Comparison — BullMQ/Redis vs Kafka vs Google Pub/Sub vs NATS JetStream
 
 Which message transport should carry inbound SMS from the webhook to the worker? This
-doc compares the three realistic options against the five hard requirements of this
+doc compares the four realistic options against the five hard requirements of this
 system, then gives pros/cons and a recommendation.
 
 It is the decision record behind the "ordering at scale" choice in
@@ -158,21 +158,78 @@ lock-in for near-zero ops. Gets you the most of R1–R3 with the least code.
 
 ---
 
+## Option D — NATS JetStream
+
+NATS is a lightweight messaging system (single Go binary). **JetStream** is its
+persistence layer: durable **streams** (an append log over subjects), pull/push
+**consumers** with acks, publish **deduplication**, replication, and replay. It sits
+between BullMQ (light, simple) and Kafka (heavy, log).
+
+**How it solves the requirements**
+
+- **R1 ordering:** a stream preserves publish order **per subject**. Route a
+  conversation to its own subject (`sms.conv.<convId>`) — or hash it into N partition
+  subjects via JetStream's deterministic **subject partitioning**
+  (`{{partition(N,...)}}`) — and a filtered/ordered consumer reads that lane in order.
+- **R2 no requeue:** **yes, by design** — partition by `convId` and run one consumer
+  per partition (or a work-queue consumer with `MaxAckPending=1` on the filter), so the
+  next message for a lane isn't delivered until the prior is acked. No app-side lock or
+  requeue. Within a shared partition, conversations head-of-line one another (same as a
+  Kafka partition); true single-conversation lane needs the per-key filter + ack=1.
+- **R3 no loss:** file storage + **Raft replication** (`replicas=3`); publish is acked
+  only after the message is persisted/replicated. Strong, Kafka-class durability.
+- **R4 exactly-once send:** JetStream dedups **publishes** by `Nats-Msg-Id` within a
+  configurable window (default ~2 min), plus consumer double-ack — but, like Kafka and
+  Pub/Sub, this is **intra-broker**. The Twilio call still needs our intent + reconcile.
+- **R5 hot conversation:** the hot key is a single lane → same coalescing/sharding.
+
+**Pros**
+
+- **Much lighter ops than Kafka** — one small binary, fast clustering, low resource
+  footprint; easy to self-host and run multi-tenant.
+- Durable streams **and** native **dedup + replay + retention + Raft replication** —
+  most of Kafka's strengths without the broker/KRaft weight.
+- **Best-in-class native retry/delay:** per-consumer `AckWait`, `Nak` with delay,
+  backoff schedules, `MaxDeliver`, and DLQ via advisories — richer than Kafka, on par
+  with BullMQ. (Kafka makes you build retry topics by hand.)
+- Open source with **no paid tier for ordering** (unlike BullMQ Pro groups); low latency
+  (closer to Redis than to Kafka).
+- Subject partitioning gives Kafka-style per-key ordering **and** R2 for free.
+
+**Cons**
+
+- **Smaller ecosystem** than Kafka/Pub/Sub — fewer connectors, less tooling, smaller
+  ops knowledge base, fewer managed offerings (mainly Synadia Cloud).
+- True **per-key single-lane across a worker pool** is a design exercise (subject
+  partitioning + `MaxAckPending`), not as turnkey as Kafka partitions or Pro groups.
+- The exactly-once **dedup window is time-bounded** — must be sized against the retry
+  horizon, or duplicates slip through (the durable guarantee stays our DB constraint).
+- Ordering can be subtle under redelivery/failures unless you use ordered consumers and
+  careful ack handling.
+- Weaker stream-processing story than Kafka (no Kafka Streams/ksqlDB equivalent).
+
+**Best when:** you want **Kafka-like ordering + durability with far lighter ops and
+better native retries**, no paid tier, and can accept a smaller ecosystem. A strong
+middle ground for this workload.
+
+---
+
 ## Side-by-side
 
-| | **BullMQ/Redis** | **Kafka** | **Pub/Sub** |
-|---|---|---|---|
-| R1 per-key ordering | App lock (OSS) / native (**Pro**) | **Native, free** (partition key) | **Native** (ordering key) |
-| R2 removes requeue | Only with **Pro groups** | **Yes** | **Yes** |
-| R3 no loss | AOF + retries (+outbox/HA) | **Strongest** (replication, acks=all) | **Managed** + DLQ |
-| R4 exactly-once *send* | App intent + reconcile | App intent + reconcile | App intent + reconcile |
-| R5 hot conversation | Coalesce / shard | Coalesce / shard (+sub-partition) | Coalesce / shard |
-| Delayed retry / backoff | **Native, rich** | Extra topics (DIY) | Retry policy + DLQ |
-| Replay / retention | No | **Yes** | Limited |
-| Latency | **Lowest** | Medium | Medium/variable |
-| Ops burden | **Low** (have it) | **High** (or managed) | **Lowest** (managed) |
-| Cost shape | Infra + Pro license | Infra/SRE or managed | Pay-per-use, lock-in |
-| Max throughput | High | **Highest** | Very high |
+| | **BullMQ/Redis** | **Kafka** | **Pub/Sub** | **NATS JetStream** |
+|---|---|---|---|---|
+| R1 per-key ordering | App lock (OSS) / native (**Pro**) | **Native, free** (partition key) | **Native** (ordering key) | **Native** (subject / partition) |
+| R2 removes requeue | Only with **Pro groups** | **Yes** | **Yes** | **Yes** (partition + ack=1) |
+| R3 no loss | AOF + retries (+outbox/HA) | **Strongest** (replication, acks=all) | **Managed** + DLQ | **Strong** (Raft replicas) |
+| R4 exactly-once *send* | App intent + reconcile | App intent + reconcile | App intent + reconcile | App intent + reconcile |
+| R5 hot conversation | Coalesce / shard | Coalesce / shard (+sub-partition) | Coalesce / shard | Coalesce / shard |
+| Delayed retry / backoff | **Native, rich** | Extra topics (DIY) | Retry policy + DLQ | **Native, rich** (Nak/AckWait) |
+| Replay / retention | No | **Yes** | Limited | **Yes** |
+| Latency | **Lowest** | Medium | Medium/variable | **Low** |
+| Ops burden | **Low** (have it) | **High** (or managed) | **Lowest** (managed) | **Low–medium** (one binary) |
+| Cost shape | Infra + Pro license | Infra/SRE or managed | Pay-per-use, lock-in | Infra (no license) |
+| Max throughput | High | **Highest** | Very high | High |
+| Ecosystem maturity | High | **Highest** | High | Smaller |
 
 ## Recommendation
 
@@ -184,6 +241,11 @@ lock-in for near-zero ops. Gets you the most of R1–R3 with the least code.
 - **All-in on GCP, optimize for zero ops:** **Pub/Sub** — native ordering keys +
   exactly-once delivery + DLQ cover R1–R3 with the least code; accept lock-in, cost,
   and less control.
+- **Want Kafka-class ordering + durability but lighter ops, rich native retries, and no
+  license/lock-in:** **NATS JetStream** — native per-key ordering (R1+R2) via subject
+  partitioning, Raft-replicated durability (R3), and the best built-in retry/delay of
+  the four; accept a smaller ecosystem and a bit of partitioning design. The strongest
+  middle ground if outgrowing BullMQ but Kafka feels heavy.
 
 **Whatever the choice, R4 (no double-text) and R5 (hot conversations) stay in our
 application layer** — the intent-before-send + reconciliation (§A) and burst coalescing
