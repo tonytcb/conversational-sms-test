@@ -20,7 +20,7 @@ architecture · Docker Compose · Mountebank (Twilio mock) · Vitest + Playwrigh
 flowchart LR
   C((Customer)) --> Tw[Twilio]
   Tw -- "signed webhook" --> API
-  API -- "enqueue\njobId=MessageSid" --> Redis[("Redis / BullMQ")]
+  API -- "enqueue\njobId=MessageSid\npartitioned by conversation" --> Redis[("Redis / BullMQ")]
   Redis --> Worker
   Worker -- "reply" --> MB[Mountebank\nTwilio mock]
   Worker <--> PG[("Postgres")]
@@ -30,12 +30,19 @@ flowchart LR
 
 - **API hot path** = parse + one Redis enqueue + ack (empty TwiML `200`). No DB →
   the 5s budget is never at risk.
-- **Worker** persists (dedup on `provider_sid`), enforces per-conversation
-  ordering (Redis lock + head check), simulates 3–15s, generates and sends the
-  reply, and records every status transition.
-- **Idempotency**: queue jobId + unique `provider_sid` (receive) and the reply
-  link (send). **No loss** via durable Redis (AOF) + BullMQ retries/stalled-job
-  recovery. **Ordering** via a per-conversation lock + head check.
+- **Worker** persists (dedup on `provider_sid` + per-conversation `seq`), simulates
+  3–15s, generates and **sends the reply exactly-once** (persist intent before the
+  call + idempotency key), and records every status transition.
+- **Idempotency**: queue jobId + unique `provider_sid` (receive); intent row +
+  `idempotency_key` + unique `reply_to_message_id` (send, exactly-once). **No loss**
+  via durable Redis (AOF) + BullMQ retries/stalled-job recovery. **Ordering** via a
+  per-conversation **queue partition** (one lane per conversation, no requeue).
+- **Hot conversations** keep order *and* throughput: cheap ordered ingest (`seq`)
+  is split from heavy parallel processing, replies re-ordered on send.
+
+> The exactly-once send, queue partitioning, and hot-conversation scaling are the
+> production design documented in **[docs/PRODUCTION-HARDENING.md](./docs/PRODUCTION-HARDENING.md)**;
+> the v1 code still uses a Redis lock + head check + requeue (called out inline in the docs).
 
 ## Repository layout
 

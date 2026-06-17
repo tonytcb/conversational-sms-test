@@ -11,9 +11,9 @@ independently-scalable services.
 | Concern        | Choice                                  |
 |----------------|-----------------------------------------|
 | HTTP           | Fastify 5 (`@fastify/formbody`, `cors`) |
-| Queue          | BullMQ (Redis), durable jobs + retries  |
+| Queue          | BullMQ (Redis), durable jobs + retries; **Pro groups** partition per conversation (target) |
 | DB             | Postgres + Drizzle ORM (SQL-first)      |
-| Ordering lock  | Redis `SET NX PX` + Lua release         |
+| Ordering       | Queue partition per conversation (target) · Redis `SET NX PX` + Lua lock (v1) |
 | Validation     | Zod (env + inbound)                     |
 | Observability  | pino (JSON structured logs)             |
 | Tests          | Vitest (unit + integration)             |
@@ -38,16 +38,23 @@ unit-testable against in-memory fakes (`test/support/fakes.ts`).
 - **Inbound webhook = hot path.** Parse the payload and enqueue one BullMQ job,
   then ack with empty TwiML `200`. The 5s Twilio timeout is never at risk. `jobId = MessageSid`
   drops most duplicate deliveries at the queue.
-- **Worker** does the rest asynchronously: take a per-conversation Redis lock,
-  persist the inbound (dedup on `provider_sid`), ensure it's next in receive-order
-  (else requeue), simulate 3–15s of work, then send the reply (skipping if one
-  already exists) and mark it `sent`. Every transition is recorded in
+- **Worker** does the rest asynchronously: drain the conversation's **queue
+  partition** (one lane per conversation → ordering with no lock/requeue), persist
+  the inbound (dedup on `provider_sid`, stamp per-conversation `seq`), simulate
+  3–15s, then send the reply **exactly-once** (persist intent → call Twilio with an
+  idempotency key → finalize) and mark it `sent`. Every transition is recorded in
   `message_events`.
 - **No loss** rests on durable Redis (AOF), BullMQ retries + stalled-job recovery,
   and idempotent reprocessing.
 
-See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the full rationale and the
-production roadmap.
+See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the full rationale, and
+[`docs/PRODUCTION-HARDENING.md`](../docs/PRODUCTION-HARDENING.md) for the
+exactly-once / ordering / hot-conversation design this branch builds toward.
+
+> **v1 vs target.** The committed code enforces ordering with a per-conversation
+> Redis lock + head check + requeue and sends the reply *before* persisting it
+> (`findReplyTo` guards re-sends). The partition + intent-before-send design above is
+> documented in `docs/PRODUCTION-HARDENING.md`; divergences are flagged inline there.
 
 ## API
 
